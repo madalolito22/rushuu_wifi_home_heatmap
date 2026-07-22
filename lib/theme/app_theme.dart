@@ -58,7 +58,10 @@ class AppTheme {
       cardTheme: CardThemeData(
         elevation: 0,
         color: isDark ? scheme.surfaceContainerHigh : scheme.surfaceContainer,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(20),
+          side: BorderSide(color: scheme.outlineVariant.withValues(alpha: 0.4)),
+        ),
         margin: EdgeInsets.zero,
       ),
       dividerTheme: DividerThemeData(color: scheme.outlineVariant.withValues(alpha: 0.5)),

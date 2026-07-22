@@ -65,8 +65,7 @@ class InsightScreen extends StatelessWidget {
                   const SizedBox(height: 24),
                   Center(
                     child: Text(
-                      'Confianza del análisis: ${report.confidencePercent}% · '
-                      'estimación calculada a partir de tus mediciones, no es una IA de verdad',
+                      'Confianza del análisis: ${report.confidencePercent}%',
                       textAlign: TextAlign.center,
                       style: Theme.of(context).textTheme.bodySmall,
                     ),

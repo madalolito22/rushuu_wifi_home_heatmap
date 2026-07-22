@@ -13,6 +13,8 @@ import '../theme/app_theme.dart';
 import '../widgets/heatmap_painter.dart';
 import 'insight_screen.dart';
 
+enum _HeatmapMenuAction { toggleLegend, placeRouter }
+
 class HeatmapScreen extends StatefulWidget {
   final HeatmapSession initialSession;
 
@@ -217,23 +219,37 @@ class _HeatmapScreenState extends State<HeatmapScreen> {
             ),
           ),
           IconButton(
-            tooltip: _session.routerPosition == null ? 'Colocar router' : 'Mover router',
-            onPressed: _placingRouter ? null : () => setState(() => _placingRouter = true),
-            isSelected: _placingRouter,
-            icon: const Icon(Icons.router_outlined),
-            selectedIcon: const Icon(Icons.router_rounded),
-          ),
-          IconButton(
-            tooltip: 'Leyenda de señal',
-            onPressed: () => setState(() => _showLegend = !_showLegend),
-            isSelected: _showLegend,
-            icon: const Icon(Icons.info_outline_rounded),
-            selectedIcon: const Icon(Icons.info_rounded),
-          ),
-          IconButton(
             tooltip: 'Deshacer último punto',
             onPressed: _session.points.isEmpty ? null : _undoLast,
             icon: const Icon(Icons.undo_rounded),
+          ),
+          PopupMenuButton<_HeatmapMenuAction>(
+            tooltip: 'Más opciones',
+            onSelected: (action) {
+              switch (action) {
+                case _HeatmapMenuAction.toggleLegend:
+                  setState(() => _showLegend = !_showLegend);
+                case _HeatmapMenuAction.placeRouter:
+                  setState(() => _placingRouter = true);
+              }
+            },
+            itemBuilder: (context) => [
+              PopupMenuItem(
+                value: _HeatmapMenuAction.toggleLegend,
+                child: ListTile(
+                  leading: Icon(_showLegend ? Icons.info_rounded : Icons.info_outline_rounded),
+                  title: Text(_showLegend ? 'Ocultar leyenda' : 'Mostrar leyenda'),
+                ),
+              ),
+              PopupMenuItem(
+                value: _HeatmapMenuAction.placeRouter,
+                enabled: !_placingRouter,
+                child: ListTile(
+                  leading: const Icon(Icons.router_rounded),
+                  title: Text(_session.routerPosition == null ? 'Colocar router' : 'Mover router'),
+                ),
+              ),
+            ],
           ),
           const SizedBox(width: 8),
         ],
