@@ -8,7 +8,7 @@ import '../theme/app_theme.dart';
 /// fade out rather than extrapolating a confident color.
 class HeatmapPainter extends CustomPainter {
   final List<CapturedPoint> points;
-  static const _gridStep = 14.0; // pixels per cell, in canvas space
+  static const _gridStep = 8.0; // pixels per cell, in canvas space — kept fine since the layer gets blurred afterwards
   static const _idwPower = 2.0;
   static const _fadeRadiusFraction = 0.22; // fraction of the shorter canvas side
 

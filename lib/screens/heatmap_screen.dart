@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -289,9 +290,9 @@ class _HeatmapScreenState extends State<HeatmapScreen> {
                 if (_showLegend)
                   SafeArea(
                     child: Align(
-                      alignment: Alignment.topRight,
+                      alignment: Alignment.topCenter,
                       child: Padding(
-                        padding: const EdgeInsets.only(top: 12, right: 12),
+                        padding: const EdgeInsets.only(top: 12),
                         child: const _SignalLegend(),
                       ),
                     ),
@@ -346,7 +347,13 @@ class _PlanCanvas extends StatelessWidget {
                   fit: StackFit.expand,
                   children: [
                     Image.file(File(planImagePath), fit: BoxFit.fill),
-                    CustomPaint(painter: HeatmapPainter(points)),
+                    // Blurring the interpolation grid turns its discrete cells
+                    // into a smooth continuous gradient instead of a visible
+                    // mosaic of squares.
+                    ImageFiltered(
+                      imageFilter: ui.ImageFilter.blur(sigmaX: 10, sigmaY: 10, tileMode: TileMode.decal),
+                      child: CustomPaint(painter: HeatmapPainter(points)),
+                    ),
                     for (var i = 0; i < points.length; i++)
                       Positioned(
                         left: points[i].dx * size.width - 10,
@@ -472,31 +479,26 @@ class _SignalLegend extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final labelStyle = Theme.of(context).textTheme.labelSmall;
     return _GlassCard(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.center,
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
         children: [
-          Text('Señal', style: Theme.of(context).textTheme.labelSmall),
-          const SizedBox(height: 6),
+          Text('${AppTheme.bestRssiDbm}', style: labelStyle?.copyWith(fontWeight: FontWeight.w700)),
+          const SizedBox(width: 6),
           Container(
-            width: 14,
-            height: 70,
+            width: 56,
+            height: 8,
             decoration: BoxDecoration(
               gradient: const LinearGradient(
-                begin: Alignment.topCenter,
-                end: Alignment.bottomCenter,
                 colors: [AppTheme.signalStrong, AppTheme.signalMid, AppTheme.signalWeak],
               ),
-              borderRadius: BorderRadius.circular(7),
+              borderRadius: BorderRadius.circular(4),
             ),
           ),
-          const SizedBox(height: 6),
-          Text('fuerte', style: Theme.of(context).textTheme.labelSmall),
-          Text('${AppTheme.bestRssiDbm} dBm', style: Theme.of(context).textTheme.labelSmall),
-          const SizedBox(height: 4),
-          Text('débil', style: Theme.of(context).textTheme.labelSmall),
-          Text('${AppTheme.worstRssiDbm} dBm', style: Theme.of(context).textTheme.labelSmall),
+          const SizedBox(width: 6),
+          Text('${AppTheme.worstRssiDbm} dBm', style: labelStyle?.copyWith(fontWeight: FontWeight.w700)),
         ],
       ),
     );
