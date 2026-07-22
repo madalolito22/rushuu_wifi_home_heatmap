@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../models/captured_point.dart';
+import '../theme/app_theme.dart';
 
 /// Paints a coverage heatmap over a floor plan using inverse-distance-weighted
 /// interpolation between captured points. Cells far from any measurement
@@ -30,7 +31,7 @@ class HeatmapPainter extends CustomPainter {
         final alpha = (1 - (nearestDist / fadeRadius)).clamp(0.0, 1.0);
         if (alpha <= 0.02) continue;
 
-        paint.color = _colorForQuality(value).withValues(alpha: alpha * 0.65);
+        paint.color = AppTheme.colorForQuality(value).withValues(alpha: alpha * 0.65);
         canvas.drawRect(Rect.fromLTWH(x, y, _gridStep, _gridStep), paint);
       }
     }
@@ -48,11 +49,11 @@ class HeatmapPainter extends CustomPainter {
       nearestDist = dist < nearestDist ? dist : nearestDist;
 
       if (dist < 1) {
-        return (_qualityFor(p.rssiDbm), 0);
+        return (AppTheme.qualityForRssi(p.rssiDbm), 0);
       }
       final w = 1 / _pow(dist, _idwPower);
       weightSum += w;
-      valueSum += w * _qualityFor(p.rssiDbm);
+      valueSum += w * AppTheme.qualityForRssi(p.rssiDbm);
     }
 
     if (weightSum == 0) return null;
@@ -67,20 +68,6 @@ class HeatmapPainter extends CustomPainter {
       n -= 1;
     }
     return result;
-  }
-
-  /// Maps RSSI in dBm to a 0..1 quality scale. -30 dBm (excellent) -> 1.0,
-  /// -85 dBm (unusable) -> 0.0.
-  double _qualityFor(int rssiDbm) {
-    const best = -30.0;
-    const worst = -85.0;
-    return ((rssiDbm - worst) / (best - worst)).clamp(0.0, 1.0);
-  }
-
-  Color _colorForQuality(double quality) {
-    // Red (bad) -> yellow -> green (good), via HSV hue 0..120.
-    final hue = quality * 120.0;
-    return HSVColor.fromAHSV(1.0, hue, 0.85, 0.95).toColor();
   }
 
   @override
