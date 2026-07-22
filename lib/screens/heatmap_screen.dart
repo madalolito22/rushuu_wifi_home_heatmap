@@ -1,20 +1,31 @@
 import 'dart:io';
-import 'dart:ui' as ui;
+import 'dart:ui';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:permission_handler/permission_handler.dart' show openAppSettings;
 
+import '../models/access_point.dart';
 import '../models/captured_point.dart';
 import '../models/heatmap_session.dart';
-import '../models/router_position.dart';
 import '../services/session_storage.dart';
 import '../services/wifi_service.dart';
 import '../theme/app_theme.dart';
 import '../widgets/revealed_heatmap_painter.dart';
 import 'insight_screen.dart';
 
-enum _HeatmapMenuAction { toggleLegend, placeRouter, toggleFog }
+enum _HeatmapMenuAction { toggleLegend, moveActiveAp, deleteActiveAp, toggleFog }
+
+/// Describes what the next tap on the plan should do: place a brand-new
+/// access point ([existingApId] null) or move an existing one to a new
+/// spot (keeping its measured points).
+class _PendingPlacement {
+  final String? existingApId;
+  final bool isRouter;
+  final String label;
+
+  const _PendingPlacement({required this.existingApId, required this.isRouter, required this.label});
+}
 
 class HeatmapScreen extends StatefulWidget {
   final HeatmapSession initialSession;
@@ -31,28 +42,31 @@ class _HeatmapScreenState extends State<HeatmapScreen> {
   late HeatmapSession _session = widget.initialSession;
   double? _planAspectRatio;
   bool _showLegend = false;
-
-  /// Fog of war: the plan stays hidden until you actually measure it,
-  /// revealed in a circle around each captured point. On by default so new
-  /// sessions get the "explore your house" feel; can be turned off to
-  /// review the full heatmap at a glance.
   bool _fogEnabled = true;
+  bool _combinedView = false;
+  String? _activeApId;
 
-  /// True while the next tap on the plan should place the router marker
-  /// instead of capturing a signal reading. Starts true when a session has
-  /// no router yet, since that's the first thing you need to mark.
-  late bool _placingRouter = _session.routerPosition == null;
-
-  /// Position of an in-flight capture, shown as a small local spinner
-  /// instead of dimming the whole screen so the user can keep walking
-  /// and tapping without losing sight of the plan.
+  _PendingPlacement? _pendingPlacement;
   Offset? _pendingTapPosition;
   _CaptureFeedback? _feedback;
+
+  AccessPoint? get _activeAp {
+    if (_activeApId == null) return null;
+    for (final ap in _session.accessPoints) {
+      if (ap.id == _activeApId) return ap;
+    }
+    return null;
+  }
 
   @override
   void initState() {
     super.initState();
     _resolvePlanAspectRatio();
+    if (_session.accessPoints.isEmpty) {
+      _pendingPlacement = const _PendingPlacement(existingApId: null, isRouter: true, label: 'Router');
+    } else {
+      _activeApId = (_session.router ?? _session.accessPoints.first).id;
+    }
     WidgetsBinding.instance.addPostFrameCallback((_) => _ensureLocationPermission());
   }
 
@@ -109,30 +123,52 @@ class _HeatmapScreenState extends State<HeatmapScreen> {
   }
 
   Future<void> _handleTap(Offset localPosition, Size imageSize) async {
-    if (_placingRouter) {
-      await _placeRouter(localPosition, imageSize);
-    } else {
+    if (_pendingPlacement != null) {
+      await _placeAp(localPosition, imageSize);
+    } else if (!_combinedView) {
       await _capturePoint(localPosition, imageSize);
     }
   }
 
-  Future<void> _placeRouter(Offset localPosition, Size imageSize) async {
-    final position = RouterPosition(
-      dx: (localPosition.dx / imageSize.width).clamp(0.0, 1.0),
-      dy: (localPosition.dy / imageSize.height).clamp(0.0, 1.0),
-    );
-    final updated = _session.copyWith(routerPosition: position);
+  Future<void> _placeAp(Offset localPosition, Size imageSize) async {
+    final pending = _pendingPlacement!;
+    final dx = (localPosition.dx / imageSize.width).clamp(0.0, 1.0);
+    final dy = (localPosition.dy / imageSize.height).clamp(0.0, 1.0);
+
+    HeatmapSession updated;
+    String newActiveId;
+
+    if (pending.existingApId == null) {
+      final newAp = AccessPoint(
+        id: DateTime.now().microsecondsSinceEpoch.toString(),
+        label: pending.label,
+        isRouter: pending.isRouter,
+        dx: dx,
+        dy: dy,
+        points: const [],
+      );
+      updated = _session.copyWith(accessPoints: [..._session.accessPoints, newAp]);
+      newActiveId = newAp.id;
+    } else {
+      final existing = _session.accessPoints.firstWhere((a) => a.id == pending.existingApId);
+      updated = _session.replaceAccessPoint(existing.copyWith(dx: dx, dy: dy));
+      newActiveId = existing.id;
+    }
+
     HapticFeedback.mediumImpact();
     setState(() {
       _session = updated;
-      _placingRouter = false;
-      _feedback = const _CaptureFeedback(message: 'Router colocado', success: true, quality: 1);
+      _activeApId = newActiveId;
+      _combinedView = false;
+      _pendingPlacement = null;
+      _feedback = _CaptureFeedback(message: '${pending.label} colocado', success: true, quality: 1);
     });
     await _storage.save(updated);
   }
 
   Future<void> _capturePoint(Offset localPosition, Size imageSize) async {
-    if (_pendingTapPosition != null) return;
+    final activeAp = _activeAp;
+    if (activeAp == null || _pendingTapPosition != null) return;
     setState(() {
       _pendingTapPosition = localPosition;
       _feedback = null;
@@ -159,7 +195,7 @@ class _HeatmapScreenState extends State<HeatmapScreen> {
         capturedAt: DateTime.now(),
       );
 
-      final updated = _session.copyWith(points: [..._session.points, point]);
+      final updated = _session.replaceAccessPoint(activeAp.copyWith(points: [...activeAp.points, point]));
       HapticFeedback.lightImpact();
       setState(() {
         _session = updated;
@@ -176,8 +212,11 @@ class _HeatmapScreenState extends State<HeatmapScreen> {
   }
 
   Future<void> _undoLast() async {
-    if (_session.points.isEmpty) return;
-    final updated = _session.copyWith(points: _session.points.sublist(0, _session.points.length - 1));
+    final activeAp = _activeAp;
+    if (activeAp == null || activeAp.points.isEmpty) return;
+    final updated = _session.replaceAccessPoint(
+      activeAp.copyWith(points: activeAp.points.sublist(0, activeAp.points.length - 1)),
+    );
     setState(() {
       _session = updated;
       _feedback = null;
@@ -186,7 +225,9 @@ class _HeatmapScreenState extends State<HeatmapScreen> {
   }
 
   Future<void> _deletePointAt(int index) async {
-    final point = _session.points[index];
+    final activeAp = _activeAp;
+    if (activeAp == null) return;
+    final point = activeAp.points[index];
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
@@ -200,14 +241,69 @@ class _HeatmapScreenState extends State<HeatmapScreen> {
     );
     if (confirmed != true) return;
 
-    final points = List.of(_session.points)..removeAt(index);
-    final updated = _session.copyWith(points: points);
+    final points = List.of(activeAp.points)..removeAt(index);
+    final updated = _session.replaceAccessPoint(activeAp.copyWith(points: points));
     setState(() => _session = updated);
     await _storage.save(updated);
   }
 
+  void _startAddingRepeater() {
+    final repeaterCount = _session.repeaters.length;
+    setState(() {
+      _pendingPlacement = _PendingPlacement(
+        existingApId: null,
+        isRouter: false,
+        label: 'Repetidor ${repeaterCount + 1}',
+      );
+      _combinedView = false;
+    });
+  }
+
+  void _startMovingActiveAp() {
+    final ap = _activeAp;
+    if (ap == null) return;
+    setState(() {
+      _pendingPlacement = _PendingPlacement(existingApId: ap.id, isRouter: ap.isRouter, label: ap.label);
+    });
+  }
+
+  Future<void> _deleteActiveAp() async {
+    final ap = _activeAp;
+    if (ap == null || ap.isRouter) return;
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Eliminar repetidor'),
+        content: Text('¿Eliminar "${ap.label}" y sus ${ap.points.length} puntos medidos?'),
+        actions: [
+          TextButton(onPressed: () => Navigator.of(context).pop(false), child: const Text('Cancelar')),
+          FilledButton(onPressed: () => Navigator.of(context).pop(true), child: const Text('Eliminar')),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+
+    final remaining = _session.accessPoints.where((a) => a.id != ap.id).toList();
+    final updated = _session.copyWith(accessPoints: remaining);
+    setState(() {
+      _session = updated;
+      _activeApId = _session.router?.id;
+    });
+    await _storage.save(updated);
+  }
+
+  String _placementBannerText(_PendingPlacement p) {
+    if (p.existingApId != null) return 'Toca la nueva posición de "${p.label}"';
+    if (p.isRouter) return 'Toca el plano donde está tu router';
+    return 'Toca el plano donde está tu "${p.label}"';
+  }
+
   @override
   Widget build(BuildContext context) {
+    final activeAp = _activeAp;
+    final canAddRepeater = _session.router != null && _pendingPlacement == null;
+
     return Scaffold(
       appBar: AppBar(
         title: const Text('Mapa de cobertura'),
@@ -227,7 +323,7 @@ class _HeatmapScreenState extends State<HeatmapScreen> {
           ),
           IconButton(
             tooltip: 'Deshacer último punto',
-            onPressed: _session.points.isEmpty ? null : _undoLast,
+            onPressed: (_combinedView || activeAp == null || activeAp.points.isEmpty) ? null : _undoLast,
             icon: const Icon(Icons.undo_rounded),
           ),
           PopupMenuButton<_HeatmapMenuAction>(
@@ -236,8 +332,10 @@ class _HeatmapScreenState extends State<HeatmapScreen> {
               switch (action) {
                 case _HeatmapMenuAction.toggleLegend:
                   setState(() => _showLegend = !_showLegend);
-                case _HeatmapMenuAction.placeRouter:
-                  setState(() => _placingRouter = true);
+                case _HeatmapMenuAction.moveActiveAp:
+                  _startMovingActiveAp();
+                case _HeatmapMenuAction.deleteActiveAp:
+                  _deleteActiveAp();
                 case _HeatmapMenuAction.toggleFog:
                   setState(() => _fogEnabled = !_fogEnabled);
               }
@@ -258,11 +356,19 @@ class _HeatmapScreenState extends State<HeatmapScreen> {
                 ),
               ),
               PopupMenuItem(
-                value: _HeatmapMenuAction.placeRouter,
-                enabled: !_placingRouter,
+                value: _HeatmapMenuAction.moveActiveAp,
+                enabled: _pendingPlacement == null && activeAp != null && !_combinedView,
                 child: ListTile(
-                  leading: const Icon(Icons.router_rounded),
-                  title: Text(_session.routerPosition == null ? 'Colocar router' : 'Mover router'),
+                  leading: const Icon(Icons.open_with_rounded),
+                  title: Text(activeAp == null ? 'Mover' : 'Mover "${activeAp.label}"'),
+                ),
+              ),
+              PopupMenuItem(
+                value: _HeatmapMenuAction.deleteActiveAp,
+                enabled: activeAp != null && !activeAp.isRouter && !_combinedView,
+                child: ListTile(
+                  leading: const Icon(Icons.delete_outline_rounded),
+                  title: Text(activeAp == null || activeAp.isRouter ? 'Eliminar repetidor' : 'Eliminar "${activeAp.label}"'),
                 ),
               ),
             ],
@@ -272,6 +378,25 @@ class _HeatmapScreenState extends State<HeatmapScreen> {
       ),
       body: Column(
         children: [
+          if (_session.accessPoints.isNotEmpty)
+            IgnorePointer(
+              ignoring: _pendingPlacement != null,
+              child: Opacity(
+                opacity: _pendingPlacement != null ? 0.4 : 1,
+                child: _ApSwitcher(
+                  accessPoints: _session.accessPoints,
+                  activeApId: _activeApId,
+                  combinedView: _combinedView,
+                  canAddRepeater: canAddRepeater,
+                  onSelectAp: (id) => setState(() {
+                    _activeApId = id;
+                    _combinedView = false;
+                  }),
+                  onSelectCombined: () => setState(() => _combinedView = true),
+                  onAddRepeater: _startAddingRepeater,
+                ),
+              ),
+            ),
           Expanded(
             child: Stack(
               children: [
@@ -281,25 +406,33 @@ class _HeatmapScreenState extends State<HeatmapScreen> {
                       : _PlanCanvas(
                           planImagePath: _session.planImagePath,
                           aspectRatio: _planAspectRatio!,
-                          points: _session.points,
-                          routerPosition: _session.routerPosition,
+                          pointGroups: _combinedView
+                              ? _session.accessPoints.map((a) => a.points).toList()
+                              : [activeAp?.points ?? const []],
+                          displayPoints: _combinedView
+                              ? _session.accessPoints.expand((a) => a.points).toList()
+                              : (activeAp?.points ?? const []),
+                          anchors: _combinedView
+                              ? _session.accessPoints
+                              : (activeAp == null ? const [] : [activeAp]),
+                          showAnchorLabels: _combinedView,
                           pendingTapPosition: _pendingTapPosition,
-                          placingRouter: _placingRouter,
                           fogEnabled: _fogEnabled,
                           onTapImage: _handleTap,
-                          onDeletePoint: _deletePointAt,
+                          onDeletePoint: _combinedView ? null : _deletePointAt,
                         ),
                 ),
-                if (_placingRouter)
+                if (_pendingPlacement != null)
                   Positioned(
                     top: 12,
                     left: 16,
                     right: 16,
                     child: SafeArea(
                       bottom: false,
-                      child: _RouterPlacementBanner(
-                        canCancel: _session.routerPosition != null,
-                        onCancel: () => setState(() => _placingRouter = false),
+                      child: _PlacementBanner(
+                        text: _placementBannerText(_pendingPlacement!),
+                        canCancel: _session.accessPoints.isNotEmpty,
+                        onCancel: () => setState(() => _pendingPlacement = null),
                       ),
                     ),
                   ),
@@ -316,7 +449,74 @@ class _HeatmapScreenState extends State<HeatmapScreen> {
               ],
             ),
           ),
-          _BottomBar(pointCount: _session.points.length, feedback: _feedback, placingRouter: _placingRouter),
+          _BottomBar(
+            pointCount: _combinedView
+                ? _session.accessPoints.fold(0, (sum, a) => sum + a.points.length)
+                : (activeAp?.points.length ?? 0),
+            feedback: _feedback,
+            hintText: _combinedView
+                ? 'Vista combinada: comparando la cobertura de todos tus puntos de acceso'
+                : 'Toca el plano donde estás para medir la señal ahí',
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _ApSwitcher extends StatelessWidget {
+  final List<AccessPoint> accessPoints;
+  final String? activeApId;
+  final bool combinedView;
+  final bool canAddRepeater;
+  final void Function(String apId) onSelectAp;
+  final VoidCallback onSelectCombined;
+  final VoidCallback onAddRepeater;
+
+  const _ApSwitcher({
+    required this.accessPoints,
+    required this.activeApId,
+    required this.combinedView,
+    required this.canAddRepeater,
+    required this.onSelectAp,
+    required this.onSelectCombined,
+    required this.onAddRepeater,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      height: 56,
+      child: ListView(
+        scrollDirection: Axis.horizontal,
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        children: [
+          for (final ap in accessPoints)
+            Padding(
+              padding: const EdgeInsets.only(right: 8),
+              child: ChoiceChip(
+                label: Text(ap.label),
+                avatar: Icon(ap.isRouter ? Icons.router_rounded : Icons.settings_input_antenna_rounded, size: 18),
+                selected: !combinedView && activeApId == ap.id,
+                onSelected: (_) => onSelectAp(ap.id),
+              ),
+            ),
+          if (accessPoints.length >= 2)
+            Padding(
+              padding: const EdgeInsets.only(right: 8),
+              child: ChoiceChip(
+                label: const Text('Vista combinada'),
+                avatar: const Icon(Icons.layers_rounded, size: 18),
+                selected: combinedView,
+                onSelected: (_) => onSelectCombined(),
+              ),
+            ),
+          if (canAddRepeater)
+            ActionChip(
+              label: const Text('Añadir repetidor'),
+              avatar: const Icon(Icons.add_rounded, size: 18),
+              onPressed: onAddRepeater,
+            ),
         ],
       ),
     );
@@ -329,21 +529,23 @@ class _HeatmapScreenState extends State<HeatmapScreen> {
 class _PlanCanvas extends StatelessWidget {
   final String planImagePath;
   final double aspectRatio;
-  final List<CapturedPoint> points;
-  final RouterPosition? routerPosition;
+  final List<List<CapturedPoint>> pointGroups;
+  final List<CapturedPoint> displayPoints;
+  final List<AccessPoint> anchors;
+  final bool showAnchorLabels;
   final Offset? pendingTapPosition;
-  final bool placingRouter;
   final bool fogEnabled;
   final void Function(Offset localPosition, Size imageSize) onTapImage;
-  final void Function(int index) onDeletePoint;
+  final void Function(int index)? onDeletePoint;
 
   const _PlanCanvas({
     required this.planImagePath,
     required this.aspectRatio,
-    required this.points,
-    required this.routerPosition,
+    required this.pointGroups,
+    required this.displayPoints,
+    required this.anchors,
+    required this.showAnchorLabels,
     required this.pendingTapPosition,
-    required this.placingRouter,
     required this.fogEnabled,
     required this.onTapImage,
     required this.onDeletePoint,
@@ -372,29 +574,31 @@ class _PlanCanvas extends StatelessWidget {
                     // into a smooth continuous gradient instead of a visible
                     // mosaic of squares; it also softens the fog reveal edge.
                     ImageFiltered(
-                      imageFilter: ui.ImageFilter.blur(sigmaX: 10, sigmaY: 10, tileMode: TileMode.decal),
+                      imageFilter: ImageFilter.blur(sigmaX: 10, sigmaY: 10, tileMode: TileMode.decal),
                       child: CustomPaint(
                         painter: RevealedHeatmapPainter(
-                          points: points,
-                          routerPosition: routerPosition,
+                          pointGroups: pointGroups,
+                          anchors: anchors.map((a) => Offset(a.dx, a.dy)).toList(),
                           fogEnabled: fogEnabled,
                         ),
                       ),
                     ),
-                    for (var i = 0; i < points.length; i++)
+                    for (var i = 0; i < displayPoints.length; i++)
                       Positioned(
-                        left: points[i].dx * size.width - 10,
-                        top: points[i].dy * size.height - 10,
-                        child: GestureDetector(
-                          onLongPress: () => onDeletePoint(i),
-                          child: _PointMarker(quality: AppTheme.qualityForRssi(points[i].rssiDbm)),
-                        ),
+                        left: displayPoints[i].dx * size.width - 10,
+                        top: displayPoints[i].dy * size.height - 10,
+                        child: onDeletePoint == null
+                            ? _PointMarker(quality: AppTheme.qualityForRssi(displayPoints[i].rssiDbm))
+                            : GestureDetector(
+                                onLongPress: () => onDeletePoint!(i),
+                                child: _PointMarker(quality: AppTheme.qualityForRssi(displayPoints[i].rssiDbm)),
+                              ),
                       ),
-                    if (routerPosition != null)
+                    for (final ap in anchors)
                       Positioned(
-                        left: routerPosition!.dx * size.width - 18,
-                        top: routerPosition!.dy * size.height - 18,
-                        child: IgnorePointer(ignoring: placingRouter, child: const _RouterMarker()),
+                        left: ap.dx * size.width - 18,
+                        top: ap.dy * size.height - 18,
+                        child: _ApAnchorMarker(ap: ap, showLabel: showAnchorLabels),
                       ),
                     if (pendingTapPosition != null)
                       Positioned(
@@ -449,34 +653,57 @@ class _PointMarker extends StatelessWidget {
   }
 }
 
-/// Distinct landmark marker for the router, so it's never confused with a
-/// signal-quality measurement dot.
-class _RouterMarker extends StatelessWidget {
-  const _RouterMarker();
+/// Distinct landmark marker for a router or repeater, so it's never
+/// confused with a signal-quality measurement dot.
+class _ApAnchorMarker extends StatelessWidget {
+  final AccessPoint ap;
+  final bool showLabel;
+
+  const _ApAnchorMarker({required this.ap, required this.showLabel});
 
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    return Container(
+    final icon = Container(
       width: 36,
       height: 36,
       alignment: Alignment.center,
       decoration: BoxDecoration(
-        color: scheme.primary,
+        color: ap.isRouter ? scheme.primary : scheme.tertiary,
         shape: BoxShape.circle,
         border: Border.all(color: Colors.white, width: 2.5),
         boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.35), blurRadius: 8, offset: const Offset(0, 2))],
       ),
-      child: const Icon(Icons.router_rounded, color: Colors.white, size: 20),
+      child: Icon(
+        ap.isRouter ? Icons.router_rounded : Icons.settings_input_antenna_rounded,
+        color: Colors.white,
+        size: 20,
+      ),
+    );
+
+    if (!showLabel) return icon;
+
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        icon,
+        const SizedBox(height: 2),
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+          decoration: BoxDecoration(color: Colors.black87, borderRadius: BorderRadius.circular(6)),
+          child: Text(ap.label, style: const TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.w600)),
+        ),
+      ],
     );
   }
 }
 
-class _RouterPlacementBanner extends StatelessWidget {
+class _PlacementBanner extends StatelessWidget {
+  final String text;
   final bool canCancel;
   final VoidCallback onCancel;
 
-  const _RouterPlacementBanner({required this.canCancel, required this.onCancel});
+  const _PlacementBanner({required this.text, required this.canCancel, required this.onCancel});
 
   @override
   Widget build(BuildContext context) {
@@ -485,16 +712,12 @@ class _RouterPlacementBanner extends StatelessWidget {
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
       child: Row(
         children: [
-          Icon(Icons.router_rounded, color: scheme.primary),
+          Icon(Icons.touch_app_rounded, color: scheme.primary),
           const SizedBox(width: 12),
           Expanded(
-            child: Text(
-              'Toca el plano donde está el router',
-              style: Theme.of(context).textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w600),
-            ),
+            child: Text(text, style: Theme.of(context).textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w600)),
           ),
-          if (canCancel)
-            TextButton(onPressed: onCancel, child: const Text('Cancelar')),
+          if (canCancel) TextButton(onPressed: onCancel, child: const Text('Cancelar')),
         ],
       ),
     );
@@ -535,9 +758,9 @@ class _SignalLegend extends StatelessWidget {
 class _BottomBar extends StatelessWidget {
   final int pointCount;
   final _CaptureFeedback? feedback;
-  final bool placingRouter;
+  final String hintText;
 
-  const _BottomBar({required this.pointCount, required this.feedback, required this.placingRouter});
+  const _BottomBar({required this.pointCount, required this.feedback, required this.hintText});
 
   @override
   Widget build(BuildContext context) {
@@ -565,11 +788,8 @@ class _BottomBar extends StatelessWidget {
               child: AnimatedSwitcher(
                 duration: const Duration(milliseconds: 200),
                 child: Text(
-                  feedback?.message ??
-                      (placingRouter
-                          ? 'Toca el plano donde está el router'
-                          : 'Toca el plano donde estás para medir la señal ahí'),
-                  key: ValueKey(feedback?.message ?? placingRouter),
+                  feedback?.message ?? hintText,
+                  key: ValueKey(feedback?.message ?? hintText),
                   style: Theme.of(context).textTheme.bodyMedium,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,

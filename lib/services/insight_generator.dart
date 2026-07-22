@@ -2,6 +2,7 @@ import 'dart:math';
 
 import '../models/heatmap_session.dart';
 import '../theme/app_theme.dart';
+import 'repeater_suggester.dart';
 
 enum WifiVerdict { noData, poor, mediocre, good, excellent }
 
@@ -13,6 +14,7 @@ class InsightReport {
   final int totalPoints;
   final int confidencePercent; // playful "how much to trust this" stat
   final List<String> tips;
+  final RepeaterSuggestion? repeaterSuggestion;
 
   const InsightReport({
     required this.verdict,
@@ -22,6 +24,7 @@ class InsightReport {
     required this.totalPoints,
     required this.confidencePercent,
     required this.tips,
+    this.repeaterSuggestion,
   });
 }
 
@@ -33,7 +36,7 @@ class InsightGenerator {
   static const _goodQualityThreshold = 0.5;
 
   InsightReport generate(HeatmapSession session) {
-    final points = session.points;
+    final points = session.accessPoints.expand((ap) => ap.points).toList();
     if (points.isEmpty) {
       return const InsightReport(
         verdict: WifiVerdict.noData,
@@ -55,21 +58,28 @@ class InsightGenerator {
     final weakPointCount = points.where((p) => p.rssiDbm <= _weakThresholdDbm).length;
 
     final confidence = min(97, 45 + points.length * 4);
+    final repeaterSuggestion = RepeaterSuggester().suggest(session);
 
     final tips = <String>[];
 
-    if (session.routerPosition == null) {
+    final router = session.router;
+    if (router == null) {
       tips.add('Coloca el router en el plano para que el análisis tenga en cuenta su posición.');
-    } else {
-      final dx = session.routerPosition!.dx - 0.5;
-      final dy = session.routerPosition!.dy - 0.5;
+    } else if (session.repeaters.isEmpty) {
+      final dx = router.dx - 0.5;
+      final dy = router.dy - 0.5;
       final offCenter = sqrt(dx * dx + dy * dy);
       if (offCenter > 0.32) {
         tips.add('El router está bastante desplazado hacia un lado de la casa; centrarlo podría repartir mejor la señal.');
       }
     }
 
-    if (weakPointCount > 0) {
+    if (repeaterSuggestion != null) {
+      tips.add(
+        'Un repetidor en el punto sugerido podría subir la cobertura buena de '
+        '${repeaterSuggestion.coverageBeforePercent}% a ${repeaterSuggestion.coverageAfterPercent}%.',
+      );
+    } else if (weakPointCount > 0) {
       tips.add(
         'Hay $weakPointCount ${weakPointCount == 1 ? 'punto' : 'puntos'} con señal débil (≤ $_weakThresholdDbm dBm); '
         'un repetidor cerca de esa zona ayudaría.',
@@ -92,6 +102,7 @@ class InsightGenerator {
       totalPoints: points.length,
       confidencePercent: confidence,
       tips: tips.take(3).toList(),
+      repeaterSuggestion: repeaterSuggestion,
     );
   }
 

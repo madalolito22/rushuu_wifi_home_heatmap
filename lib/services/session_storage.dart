@@ -38,7 +38,7 @@ class SessionStorage {
     final destPath = '${dir.path}/$_planFileName.$extension';
     await File(pickedImagePath).copy(destPath);
 
-    final session = HeatmapSession(planImagePath: destPath, points: const []);
+    final session = HeatmapSession(planImagePath: destPath, accessPoints: const []);
     await save(session);
     return session;
   }

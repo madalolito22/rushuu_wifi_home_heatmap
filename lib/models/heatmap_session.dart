@@ -1,37 +1,44 @@
-import 'captured_point.dart';
-import 'router_position.dart';
+import 'access_point.dart';
 
 class HeatmapSession {
   /// Path to the floor plan image, copied into app-local storage.
   final String planImagePath;
-  final List<CapturedPoint> points;
-  final RouterPosition? routerPosition;
+  final List<AccessPoint> accessPoints;
 
   const HeatmapSession({
     required this.planImagePath,
-    required this.points,
-    this.routerPosition,
+    required this.accessPoints,
   });
 
-  HeatmapSession copyWith({List<CapturedPoint>? points, RouterPosition? routerPosition}) => HeatmapSession(
+  AccessPoint? get router {
+    for (final ap in accessPoints) {
+      if (ap.isRouter) return ap;
+    }
+    return null;
+  }
+
+  List<AccessPoint> get repeaters => accessPoints.where((ap) => !ap.isRouter).toList();
+
+  HeatmapSession copyWith({List<AccessPoint>? accessPoints}) => HeatmapSession(
         planImagePath: planImagePath,
-        points: points ?? this.points,
-        routerPosition: routerPosition ?? this.routerPosition,
+        accessPoints: accessPoints ?? this.accessPoints,
+      );
+
+  HeatmapSession replaceAccessPoint(AccessPoint updated) => copyWith(
+        accessPoints: [
+          for (final ap in accessPoints) if (ap.id == updated.id) updated else ap,
+        ],
       );
 
   Map<String, dynamic> toJson() => {
         'planImagePath': planImagePath,
-        'points': points.map((p) => p.toJson()).toList(),
-        'routerPosition': routerPosition?.toJson(),
+        'accessPoints': accessPoints.map((a) => a.toJson()).toList(),
       };
 
   factory HeatmapSession.fromJson(Map<String, dynamic> json) => HeatmapSession(
         planImagePath: json['planImagePath'] as String,
-        points: (json['points'] as List)
-            .map((p) => CapturedPoint.fromJson(p as Map<String, dynamic>))
+        accessPoints: (json['accessPoints'] as List)
+            .map((a) => AccessPoint.fromJson(a as Map<String, dynamic>))
             .toList(),
-        routerPosition: json['routerPosition'] != null
-            ? RouterPosition.fromJson(json['routerPosition'] as Map<String, dynamic>)
-            : null,
       );
 }

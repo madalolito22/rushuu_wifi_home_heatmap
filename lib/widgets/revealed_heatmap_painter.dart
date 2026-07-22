@@ -1,29 +1,40 @@
 import 'package:flutter/material.dart';
 
 import '../models/captured_point.dart';
-import '../models/router_position.dart';
+import 'combined_heatmap_painter.dart';
 import 'heatmap_painter.dart';
 
-/// Wraps [HeatmapPainter] with an optional "fog of war" mask: the colored
-/// signal-quality overlay only shows in a soft circle around each measured
-/// point (and a smaller one around the router). The base floor plan image
+/// Wraps the heatmap (single-AP or combined) with an optional "fog of war"
+/// mask: the colored signal-quality overlay only shows in a soft circle
+/// around each measured point and each AP anchor. The base floor plan image
 /// underneath is never touched by this — you always see the walls and room
 /// labels so you know where to tap next, only the *data* is hidden until
 /// you've actually measured that spot.
 class RevealedHeatmapPainter extends CustomPainter {
-  final List<CapturedPoint> points;
-  final RouterPosition? routerPosition;
+  /// One list per access point. A single-element list renders as a normal
+  /// single-AP heatmap; more than one renders the combined "best AP here"
+  /// view via [CombinedHeatmapPainter].
+  final List<List<CapturedPoint>> pointGroups;
+  final List<Offset> anchors;
   final bool fogEnabled;
 
-  RevealedHeatmapPainter({required this.points, required this.routerPosition, required this.fogEnabled});
+  RevealedHeatmapPainter({required this.pointGroups, required this.anchors, required this.fogEnabled});
 
   static const _pointRevealFraction = 0.20;
-  static const _routerRevealFraction = 0.12;
+  static const _anchorRevealFraction = 0.12;
 
   @override
   void paint(Canvas canvas, Size size) {
+    void paintHeatmap() {
+      if (pointGroups.length <= 1) {
+        HeatmapPainter(pointGroups.isEmpty ? const [] : pointGroups.first).paint(canvas, size);
+      } else {
+        CombinedHeatmapPainter(pointGroups).paint(canvas, size);
+      }
+    }
+
     if (!fogEnabled) {
-      HeatmapPainter(points).paint(canvas, size);
+      paintHeatmap();
       return;
     }
 
@@ -32,7 +43,7 @@ class RevealedHeatmapPainter extends CustomPainter {
     // Layer 1: the heatmap itself, composited onto the real destination
     // normally once this outer layer is restored.
     canvas.saveLayer(fullRect, Paint());
-    HeatmapPainter(points).paint(canvas, size);
+    paintHeatmap();
 
     // Layer 2: the reveal mask (soft union of circles). Composited onto
     // layer 1 via dstIn on restore, which keeps layer 1's pixels only
@@ -49,13 +60,15 @@ class RevealedHeatmapPainter extends CustomPainter {
     }
 
     final revealRadius = size.shortestSide * _pointRevealFraction;
-    for (final p in points) {
-      drawReveal(Offset(p.dx * size.width, p.dy * size.height), revealRadius);
+    for (final group in pointGroups) {
+      for (final p in group) {
+        drawReveal(Offset(p.dx * size.width, p.dy * size.height), revealRadius);
+      }
     }
-    if (routerPosition != null) {
+    for (final anchor in anchors) {
       drawReveal(
-        Offset(routerPosition!.dx * size.width, routerPosition!.dy * size.height),
-        size.shortestSide * _routerRevealFraction,
+        Offset(anchor.dx * size.width, anchor.dy * size.height),
+        size.shortestSide * _anchorRevealFraction,
       );
     }
     canvas.restore();
@@ -65,7 +78,7 @@ class RevealedHeatmapPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(covariant RevealedHeatmapPainter oldDelegate) =>
-      oldDelegate.points != points ||
-      oldDelegate.routerPosition != routerPosition ||
+      oldDelegate.pointGroups != pointGroups ||
+      oldDelegate.anchors != anchors ||
       oldDelegate.fogEnabled != fogEnabled;
 }

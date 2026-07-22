@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 
 import '../models/heatmap_session.dart';
 import '../services/insight_generator.dart';
+import '../services/repeater_suggester.dart';
 import '../theme/app_theme.dart';
 
 class InsightScreen extends StatelessWidget {
@@ -58,6 +59,10 @@ class InsightScreen extends StatelessWidget {
                       ),
                     ],
                   ),
+                  if (report.repeaterSuggestion != null) ...[
+                    const SizedBox(height: 20),
+                    _RepeaterSuggestionCard(suggestion: report.repeaterSuggestion!),
+                  ],
                   const SizedBox(height: 28),
                   Text('Recomendaciones', style: Theme.of(context).textTheme.titleMedium),
                   const SizedBox(height: 12),
@@ -194,6 +199,84 @@ class _StatTile extends StatelessWidget {
           ],
         ),
       ),
+    );
+  }
+}
+
+class _RepeaterSuggestionCard extends StatelessWidget {
+  final RepeaterSuggestion suggestion;
+  const _RepeaterSuggestionCard({required this.suggestion});
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(18),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(Icons.settings_input_antenna_rounded, color: scheme.primary),
+                const SizedBox(width: 10),
+                Text('Repetidor recomendado', style: Theme.of(context).textTheme.titleMedium),
+              ],
+            ),
+            const SizedBox(height: 16),
+            Row(
+              children: [
+                Expanded(child: _CoverageBar(label: 'Ahora', percent: suggestion.coverageBeforePercent)),
+                const SizedBox(width: 12),
+                Icon(Icons.arrow_forward_rounded, color: scheme.onSurfaceVariant),
+                const SizedBox(width: 12),
+                Expanded(child: _CoverageBar(label: 'Con repetidor', percent: suggestion.coverageAfterPercent)),
+              ],
+            ),
+            const SizedBox(height: 14),
+            Text(
+              'Estimado a partir de ${suggestion.weakPointCount} puntos con señal débil, simulando cómo se '
+              'repartiría la señal con un repetidor en la posición marcada en el plano.',
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
+            const SizedBox(height: 14),
+            OutlinedButton.icon(
+              onPressed: () => Navigator.of(context).pop(),
+              icon: const Icon(Icons.map_outlined),
+              label: const Text('Ver posición en el plano'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _CoverageBar extends StatelessWidget {
+  final String label;
+  final int percent;
+  const _CoverageBar({required this.label, required this.percent});
+
+  @override
+  Widget build(BuildContext context) {
+    final color = AppTheme.colorForQuality(percent / 100);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(label, style: Theme.of(context).textTheme.labelSmall),
+        const SizedBox(height: 6),
+        ClipRRect(
+          borderRadius: BorderRadius.circular(6),
+          child: LinearProgressIndicator(
+            value: percent / 100,
+            minHeight: 10,
+            backgroundColor: Theme.of(context).colorScheme.surfaceContainerHighest,
+            color: color,
+          ),
+        ),
+        const SizedBox(height: 4),
+        Text('$percent%', style: Theme.of(context).textTheme.titleMedium?.copyWith(color: color)),
+      ],
     );
   }
 }

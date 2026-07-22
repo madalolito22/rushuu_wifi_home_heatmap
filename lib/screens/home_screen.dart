@@ -96,7 +96,8 @@ class _HomeScreenState extends State<HomeScreen> {
                               children: [
                                 if (_existingSession != null)
                                   _SessionCard(
-                                    pointCount: _existingSession!.points.length,
+                                    pointCount: _existingSession!.accessPoints
+                                        .fold(0, (sum, ap) => sum + ap.points.length),
                                     onContinue: _continueSession,
                                   ),
                                 if (_existingSession != null) const SizedBox(height: 16),
