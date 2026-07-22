@@ -95,9 +95,10 @@ class AppTheme {
     return HSVColor.fromAHSV(1.0, hue, 0.85, 0.95).toColor();
   }
 
+  static const bestRssiDbm = -30;
+  static const worstRssiDbm = -85;
+
   static double qualityForRssi(int rssiDbm) {
-    const best = -30.0;
-    const worst = -85.0;
-    return ((rssiDbm - worst) / (best - worst)).clamp(0.0, 1.0);
+    return ((rssiDbm - worstRssiDbm) / (bestRssiDbm - worstRssiDbm)).clamp(0.0, 1.0);
   }
 }

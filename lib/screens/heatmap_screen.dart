@@ -1,7 +1,7 @@
 import 'dart:io';
-import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../models/captured_point.dart';
 import '../models/heatmap_session.dart';
@@ -23,9 +23,14 @@ class _HeatmapScreenState extends State<HeatmapScreen> {
   final _wifiService = WifiService();
   final _storage = SessionStorage();
   late HeatmapSession _session = widget.initialSession;
-  bool _capturing = false;
-  _CaptureFeedback? _feedback;
   double? _planAspectRatio;
+  bool _showLegend = false;
+
+  /// Position of an in-flight capture, shown as a small local spinner
+  /// instead of dimming the whole screen so the user can keep walking
+  /// and tapping without losing sight of the plan.
+  Offset? _pendingTapPosition;
+  _CaptureFeedback? _feedback;
 
   @override
   void initState() {
@@ -35,7 +40,7 @@ class _HeatmapScreenState extends State<HeatmapScreen> {
 
   /// Reads the plan image's real pixel dimensions so it can be displayed
   /// with correct proportions (an AspectRatio box) instead of being
-  /// stretched to fill the screen, which distorted landscape plans.
+  /// stretched to whatever shape the screen happened to be.
   Future<void> _resolvePlanAspectRatio() async {
     final bytes = await File(_session.planImagePath).readAsBytes();
     final image = await decodeImageFromList(bytes);
@@ -44,15 +49,18 @@ class _HeatmapScreenState extends State<HeatmapScreen> {
   }
 
   Future<void> _capturePoint(Offset localPosition, Size imageSize) async {
-    if (_capturing) return;
+    if (_pendingTapPosition != null) return;
     setState(() {
-      _capturing = true;
+      _pendingTapPosition = localPosition;
       _feedback = null;
     });
 
     try {
       final reading = await _wifiService.readSignal();
+      if (!mounted) return;
+
       if (!reading.connected || reading.rssiDbm == null) {
+        HapticFeedback.selectionClick();
         setState(() => _feedback = const _CaptureFeedback(
               message: 'No hay wifi conectado ahora mismo',
               success: false,
@@ -69,6 +77,7 @@ class _HeatmapScreenState extends State<HeatmapScreen> {
       );
 
       final updated = _session.copyWith(points: [..._session.points, point]);
+      HapticFeedback.lightImpact();
       setState(() {
         _session = updated;
         _feedback = _CaptureFeedback(
@@ -79,7 +88,7 @@ class _HeatmapScreenState extends State<HeatmapScreen> {
       });
       await _storage.save(updated);
     } finally {
-      setState(() => _capturing = false);
+      if (mounted) setState(() => _pendingTapPosition = null);
     }
   }
 
@@ -93,21 +102,40 @@ class _HeatmapScreenState extends State<HeatmapScreen> {
     await _storage.save(updated);
   }
 
+  Future<void> _deletePointAt(int index) async {
+    final point = _session.points[index];
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Eliminar punto'),
+        content: Text('¿Quitar la medición de ${point.rssiDbm} dBm en este sitio?'),
+        actions: [
+          TextButton(onPressed: () => Navigator.of(context).pop(false), child: const Text('Cancelar')),
+          FilledButton(onPressed: () => Navigator.of(context).pop(true), child: const Text('Eliminar')),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+
+    final points = List.of(_session.points)..removeAt(index);
+    final updated = _session.copyWith(points: points);
+    setState(() => _session = updated);
+    await _storage.save(updated);
+  }
+
   @override
   Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-
     return Scaffold(
-      extendBodyBehindAppBar: true,
       appBar: AppBar(
         title: const Text('Mapa de cobertura'),
-        flexibleSpace: ClipRect(
-          child: BackdropFilter(
-            filter: ui.ImageFilter.blur(sigmaX: 16, sigmaY: 16),
-            child: Container(color: scheme.surface.withValues(alpha: 0.55)),
-          ),
-        ),
         actions: [
+          IconButton(
+            tooltip: 'Leyenda de señal',
+            onPressed: () => setState(() => _showLegend = !_showLegend),
+            isSelected: _showLegend,
+            icon: const Icon(Icons.info_outline_rounded),
+            selectedIcon: const Icon(Icons.info_rounded),
+          ),
           IconButton(
             tooltip: 'Deshacer último punto',
             onPressed: _session.points.isEmpty ? null : _undoLast,
@@ -116,51 +144,37 @@ class _HeatmapScreenState extends State<HeatmapScreen> {
           const SizedBox(width: 8),
         ],
       ),
-      body: Stack(
+      body: Column(
         children: [
-          Positioned.fill(
-            child: Container(
-              color: scheme.surfaceContainerLowest,
-              child: _planAspectRatio == null
-                  ? const Center(child: CircularProgressIndicator())
-                  : _PlanCanvas(
-                      planImagePath: _session.planImagePath,
-                      aspectRatio: _planAspectRatio!,
-                      points: _session.points,
-                      onTapImage: _capturePoint,
-                    ),
-            ),
-          ),
-          if (_capturing)
-            Positioned.fill(
-              child: IgnorePointer(
-                child: Container(
-                  color: Colors.black.withValues(alpha: 0.08),
-                  child: const Center(child: CircularProgressIndicator()),
+          Expanded(
+            child: Stack(
+              children: [
+                Positioned.fill(
+                  child: _planAspectRatio == null
+                      ? const Center(child: CircularProgressIndicator())
+                      : _PlanCanvas(
+                          planImagePath: _session.planImagePath,
+                          aspectRatio: _planAspectRatio!,
+                          points: _session.points,
+                          pendingTapPosition: _pendingTapPosition,
+                          onTapImage: _capturePoint,
+                          onDeletePoint: _deletePointAt,
+                        ),
                 ),
-              ),
-            ),
-          // SafeArea keeps the floating controls clear of notches, the
-          // status bar and gesture insets in both portrait and landscape.
-          Positioned.fill(
-            child: SafeArea(
-              child: Stack(
-                children: [
-                  Positioned(
-                    top: kToolbarHeight + 12,
-                    right: 16,
-                    child: const _SignalLegend(),
+                if (_showLegend)
+                  SafeArea(
+                    child: Align(
+                      alignment: Alignment.topRight,
+                      child: Padding(
+                        padding: const EdgeInsets.only(top: 12, right: 12),
+                        child: const _SignalLegend(),
+                      ),
+                    ),
                   ),
-                  Positioned(
-                    left: 16,
-                    right: 16,
-                    bottom: 16,
-                    child: _BottomBar(pointCount: _session.points.length, feedback: _feedback),
-                  ),
-                ],
-              ),
+              ],
             ),
           ),
+          _BottomBar(pointCount: _session.points.length, feedback: _feedback),
         ],
       ),
     );
@@ -168,19 +182,23 @@ class _HeatmapScreenState extends State<HeatmapScreen> {
 }
 
 /// Renders the floor plan at its true aspect ratio (centered, letterboxed
-/// if needed) so it never looks stretched, and keeps tap/marker coordinates
+/// if needed) so it's never stretched, and keeps tap/marker coordinates
 /// mapped to that same box regardless of screen orientation.
 class _PlanCanvas extends StatelessWidget {
   final String planImagePath;
   final double aspectRatio;
   final List<CapturedPoint> points;
+  final Offset? pendingTapPosition;
   final void Function(Offset localPosition, Size imageSize) onTapImage;
+  final void Function(int index) onDeletePoint;
 
   const _PlanCanvas({
     required this.planImagePath,
     required this.aspectRatio,
     required this.points,
+    required this.pendingTapPosition,
     required this.onTapImage,
+    required this.onDeletePoint,
   });
 
   @override
@@ -200,13 +218,25 @@ class _PlanCanvas extends StatelessWidget {
                   children: [
                     Image.file(File(planImagePath), fit: BoxFit.fill),
                     CustomPaint(painter: HeatmapPainter(points)),
-                    ...points.map(
-                      (p) => Positioned(
-                        left: p.dx * size.width - 7,
-                        top: p.dy * size.height - 7,
-                        child: _PointMarker(quality: AppTheme.qualityForRssi(p.rssiDbm)),
+                    for (var i = 0; i < points.length; i++)
+                      Positioned(
+                        left: points[i].dx * size.width - 10,
+                        top: points[i].dy * size.height - 10,
+                        child: GestureDetector(
+                          onLongPress: () => onDeletePoint(i),
+                          child: _PointMarker(quality: AppTheme.qualityForRssi(points[i].rssiDbm)),
+                        ),
                       ),
-                    ),
+                    if (pendingTapPosition != null)
+                      Positioned(
+                        left: pendingTapPosition!.dx - 12,
+                        top: pendingTapPosition!.dy - 12,
+                        child: const SizedBox(
+                          width: 24,
+                          height: 24,
+                          child: CircularProgressIndicator(strokeWidth: 2.5),
+                        ),
+                      ),
                   ],
                 ),
               );
@@ -233,13 +263,18 @@ class _PointMarker extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Container(
-      width: 14,
-      height: 14,
-      decoration: BoxDecoration(
-        color: AppTheme.colorForQuality(quality),
-        shape: BoxShape.circle,
-        border: Border.all(color: Colors.white, width: 2),
-        boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.25), blurRadius: 4, offset: const Offset(0, 1))],
+      width: 20,
+      height: 20,
+      alignment: Alignment.center,
+      child: Container(
+        width: 14,
+        height: 14,
+        decoration: BoxDecoration(
+          color: AppTheme.colorForQuality(quality),
+          shape: BoxShape.circle,
+          border: Border.all(color: Colors.white, width: 2),
+          boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.25), blurRadius: 4, offset: const Offset(0, 1))],
+        ),
       ),
     );
   }
@@ -271,7 +306,10 @@ class _SignalLegend extends StatelessWidget {
           ),
           const SizedBox(height: 6),
           Text('fuerte', style: Theme.of(context).textTheme.labelSmall),
+          Text('${AppTheme.bestRssiDbm} dBm', style: Theme.of(context).textTheme.labelSmall),
+          const SizedBox(height: 4),
           Text('débil', style: Theme.of(context).textTheme.labelSmall),
+          Text('${AppTheme.worstRssiDbm} dBm', style: Theme.of(context).textTheme.labelSmall),
         ],
       ),
     );
@@ -286,47 +324,52 @@ class _BottomBar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return _GlassCard(
-      padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 14),
-      child: Row(
-        children: [
-          Icon(
-            feedback == null
-                ? Icons.touch_app_rounded
-                : (feedback!.success ? Icons.check_circle_rounded : Icons.error_outline_rounded),
-            color: feedback == null
-                ? Theme.of(context).colorScheme.onSurfaceVariant
-                : (feedback!.success ? AppTheme.colorForQuality(feedback!.quality) : AppTheme.signalWeak),
-          ),
-          const SizedBox(width: 12),
-          Expanded(
-            child: AnimatedSwitcher(
-              duration: const Duration(milliseconds: 200),
+    final scheme = Theme.of(context).colorScheme;
+    return SafeArea(
+      top: false,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 14),
+        decoration: BoxDecoration(
+          color: scheme.surfaceContainer,
+          border: Border(top: BorderSide(color: scheme.outlineVariant.withValues(alpha: 0.4))),
+        ),
+        child: Row(
+          children: [
+            Icon(
+              feedback == null
+                  ? Icons.touch_app_rounded
+                  : (feedback!.success ? Icons.check_circle_rounded : Icons.error_outline_rounded),
+              color: feedback == null
+                  ? scheme.onSurfaceVariant
+                  : (feedback!.success ? AppTheme.colorForQuality(feedback!.quality) : AppTheme.signalWeak),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: AnimatedSwitcher(
+                duration: const Duration(milliseconds: 200),
+                child: Text(
+                  feedback?.message ?? 'Toca el plano donde estás para medir la señal ahí',
+                  key: ValueKey(feedback?.message),
+                  style: Theme.of(context).textTheme.bodyMedium,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+            ),
+            const SizedBox(width: 12),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+              decoration: BoxDecoration(
+                color: scheme.primaryContainer,
+                borderRadius: BorderRadius.circular(999),
+              ),
               child: Text(
-                feedback?.message ?? 'Toca el plano donde estás para medir la señal ahí',
-                key: ValueKey(feedback?.message),
-                style: Theme.of(context).textTheme.bodyMedium,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
+                '$pointCount',
+                style: TextStyle(fontWeight: FontWeight.w700, color: scheme.onPrimaryContainer),
               ),
             ),
-          ),
-          const SizedBox(width: 12),
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-            decoration: BoxDecoration(
-              color: Theme.of(context).colorScheme.primaryContainer,
-              borderRadius: BorderRadius.circular(999),
-            ),
-            child: Text(
-              '$pointCount',
-              style: TextStyle(
-                fontWeight: FontWeight.w700,
-                color: Theme.of(context).colorScheme.onPrimaryContainer,
-              ),
-            ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }
@@ -341,21 +384,15 @@ class _GlassCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    return ClipRRect(
-      borderRadius: BorderRadius.circular(20),
-      child: BackdropFilter(
-        filter: ui.ImageFilter.blur(sigmaX: 20, sigmaY: 20),
-        child: Container(
-          padding: padding,
-          decoration: BoxDecoration(
-            color: scheme.surface.withValues(alpha: 0.72),
-            borderRadius: BorderRadius.circular(20),
-            border: Border.all(color: scheme.outlineVariant.withValues(alpha: 0.4)),
-            boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.12), blurRadius: 20, offset: const Offset(0, 8))],
-          ),
-          child: child,
-        ),
+    return Container(
+      padding: padding,
+      decoration: BoxDecoration(
+        color: scheme.surfaceContainerHigh,
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: scheme.outlineVariant.withValues(alpha: 0.4)),
+        boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.2), blurRadius: 16, offset: const Offset(0, 6))],
       ),
+      child: child,
     );
   }
 }
