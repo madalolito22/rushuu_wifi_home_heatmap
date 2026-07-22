@@ -11,6 +11,7 @@ import '../services/session_storage.dart';
 import '../services/wifi_service.dart';
 import '../theme/app_theme.dart';
 import '../widgets/heatmap_painter.dart';
+import 'insight_screen.dart';
 
 class HeatmapScreen extends StatefulWidget {
   final HeatmapSession initialSession;
@@ -202,6 +203,19 @@ class _HeatmapScreenState extends State<HeatmapScreen> {
       appBar: AppBar(
         title: const Text('Mapa de cobertura'),
         actions: [
+          IconButton(
+            tooltip: 'Análisis con IA',
+            icon: const Icon(Icons.auto_awesome_rounded),
+            onPressed: () => Navigator.of(context).push(
+              PageRouteBuilder(
+                transitionDuration: const Duration(milliseconds: 300),
+                pageBuilder: (_, animation, _) => FadeTransition(
+                  opacity: animation,
+                  child: InsightScreen(session: _session),
+                ),
+              ),
+            ),
+          ),
           IconButton(
             tooltip: _session.routerPosition == null ? 'Colocar router' : 'Mover router',
             onPressed: _placingRouter ? null : () => setState(() => _placingRouter = true),
