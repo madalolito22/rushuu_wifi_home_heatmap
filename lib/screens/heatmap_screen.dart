@@ -11,10 +11,10 @@ import '../models/router_position.dart';
 import '../services/session_storage.dart';
 import '../services/wifi_service.dart';
 import '../theme/app_theme.dart';
-import '../widgets/heatmap_painter.dart';
+import '../widgets/revealed_heatmap_painter.dart';
 import 'insight_screen.dart';
 
-enum _HeatmapMenuAction { toggleLegend, placeRouter }
+enum _HeatmapMenuAction { toggleLegend, placeRouter, toggleFog }
 
 class HeatmapScreen extends StatefulWidget {
   final HeatmapSession initialSession;
@@ -31,6 +31,12 @@ class _HeatmapScreenState extends State<HeatmapScreen> {
   late HeatmapSession _session = widget.initialSession;
   double? _planAspectRatio;
   bool _showLegend = false;
+
+  /// Fog of war: the plan stays hidden until you actually measure it,
+  /// revealed in a circle around each captured point. On by default so new
+  /// sessions get the "explore your house" feel; can be turned off to
+  /// review the full heatmap at a glance.
+  bool _fogEnabled = true;
 
   /// True while the next tap on the plan should place the router marker
   /// instead of capturing a signal reading. Starts true when a session has
@@ -232,9 +238,18 @@ class _HeatmapScreenState extends State<HeatmapScreen> {
                   setState(() => _showLegend = !_showLegend);
                 case _HeatmapMenuAction.placeRouter:
                   setState(() => _placingRouter = true);
+                case _HeatmapMenuAction.toggleFog:
+                  setState(() => _fogEnabled = !_fogEnabled);
               }
             },
             itemBuilder: (context) => [
+              PopupMenuItem(
+                value: _HeatmapMenuAction.toggleFog,
+                child: ListTile(
+                  leading: Icon(_fogEnabled ? Icons.visibility_off_rounded : Icons.cloud_rounded),
+                  title: Text(_fogEnabled ? 'Ver mapa completo' : 'Activar niebla'),
+                ),
+              ),
               PopupMenuItem(
                 value: _HeatmapMenuAction.toggleLegend,
                 child: ListTile(
@@ -270,6 +285,7 @@ class _HeatmapScreenState extends State<HeatmapScreen> {
                           routerPosition: _session.routerPosition,
                           pendingTapPosition: _pendingTapPosition,
                           placingRouter: _placingRouter,
+                          fogEnabled: _fogEnabled,
                           onTapImage: _handleTap,
                           onDeletePoint: _deletePointAt,
                         ),
@@ -317,6 +333,7 @@ class _PlanCanvas extends StatelessWidget {
   final RouterPosition? routerPosition;
   final Offset? pendingTapPosition;
   final bool placingRouter;
+  final bool fogEnabled;
   final void Function(Offset localPosition, Size imageSize) onTapImage;
   final void Function(int index) onDeletePoint;
 
@@ -327,6 +344,7 @@ class _PlanCanvas extends StatelessWidget {
     required this.routerPosition,
     required this.pendingTapPosition,
     required this.placingRouter,
+    required this.fogEnabled,
     required this.onTapImage,
     required this.onDeletePoint,
   });
@@ -346,13 +364,22 @@ class _PlanCanvas extends StatelessWidget {
                 child: Stack(
                   fit: StackFit.expand,
                   children: [
+                    // The plan itself (walls, room labels) is always fully
+                    // visible — fog only ever hides the colored signal data
+                    // on top of it, never the map you need to navigate by.
                     Image.file(File(planImagePath), fit: BoxFit.fill),
                     // Blurring the interpolation grid turns its discrete cells
                     // into a smooth continuous gradient instead of a visible
-                    // mosaic of squares.
+                    // mosaic of squares; it also softens the fog reveal edge.
                     ImageFiltered(
                       imageFilter: ui.ImageFilter.blur(sigmaX: 10, sigmaY: 10, tileMode: TileMode.decal),
-                      child: CustomPaint(painter: HeatmapPainter(points)),
+                      child: CustomPaint(
+                        painter: RevealedHeatmapPainter(
+                          points: points,
+                          routerPosition: routerPosition,
+                          fogEnabled: fogEnabled,
+                        ),
+                      ),
                     ),
                     for (var i = 0; i < points.length; i++)
                       Positioned(
