@@ -1,5 +1,5 @@
 import 'dart:io';
-import 'dart:ui';
+import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
 
@@ -25,6 +25,23 @@ class _HeatmapScreenState extends State<HeatmapScreen> {
   late HeatmapSession _session = widget.initialSession;
   bool _capturing = false;
   _CaptureFeedback? _feedback;
+  double? _planAspectRatio;
+
+  @override
+  void initState() {
+    super.initState();
+    _resolvePlanAspectRatio();
+  }
+
+  /// Reads the plan image's real pixel dimensions so it can be displayed
+  /// with correct proportions (an AspectRatio box) instead of being
+  /// stretched to fill the screen, which distorted landscape plans.
+  Future<void> _resolvePlanAspectRatio() async {
+    final bytes = await File(_session.planImagePath).readAsBytes();
+    final image = await decodeImageFromList(bytes);
+    if (!mounted) return;
+    setState(() => _planAspectRatio = image.width / image.height);
+  }
 
   Future<void> _capturePoint(Offset localPosition, Size imageSize) async {
     if (_capturing) return;
@@ -86,7 +103,7 @@ class _HeatmapScreenState extends State<HeatmapScreen> {
         title: const Text('Mapa de cobertura'),
         flexibleSpace: ClipRect(
           child: BackdropFilter(
-            filter: ImageFilter.blur(sigmaX: 16, sigmaY: 16),
+            filter: ui.ImageFilter.blur(sigmaX: 16, sigmaY: 16),
             child: Container(color: scheme.surface.withValues(alpha: 0.55)),
           ),
         ),
@@ -102,32 +119,16 @@ class _HeatmapScreenState extends State<HeatmapScreen> {
       body: Stack(
         children: [
           Positioned.fill(
-            child: InteractiveViewer(
-              maxScale: 4,
-              child: LayoutBuilder(
-                builder: (context, constraints) {
-                  return GestureDetector(
-                    onTapUp: (details) => _capturePoint(
-                      details.localPosition,
-                      Size(constraints.maxWidth, constraints.maxHeight),
+            child: Container(
+              color: scheme.surfaceContainerLowest,
+              child: _planAspectRatio == null
+                  ? const Center(child: CircularProgressIndicator())
+                  : _PlanCanvas(
+                      planImagePath: _session.planImagePath,
+                      aspectRatio: _planAspectRatio!,
+                      points: _session.points,
+                      onTapImage: _capturePoint,
                     ),
-                    child: Stack(
-                      fit: StackFit.expand,
-                      children: [
-                        Image.file(File(_session.planImagePath), fit: BoxFit.fill),
-                        CustomPaint(painter: HeatmapPainter(_session.points)),
-                        ..._session.points.map(
-                          (p) => Positioned(
-                            left: p.dx * constraints.maxWidth - 7,
-                            top: p.dy * constraints.maxHeight - 7,
-                            child: _PointMarker(quality: AppTheme.qualityForRssi(p.rssiDbm)),
-                          ),
-                        ),
-                      ],
-                    ),
-                  );
-                },
-              ),
             ),
           ),
           if (_capturing)
@@ -139,18 +140,79 @@ class _HeatmapScreenState extends State<HeatmapScreen> {
                 ),
               ),
             ),
-          Positioned(
-            top: MediaQuery.of(context).padding.top + kToolbarHeight + 12,
-            right: 16,
-            child: const _SignalLegend(),
-          ),
-          Positioned(
-            left: 16,
-            right: 16,
-            bottom: 16,
-            child: _BottomBar(pointCount: _session.points.length, feedback: _feedback),
+          // SafeArea keeps the floating controls clear of notches, the
+          // status bar and gesture insets in both portrait and landscape.
+          Positioned.fill(
+            child: SafeArea(
+              child: Stack(
+                children: [
+                  Positioned(
+                    top: kToolbarHeight + 12,
+                    right: 16,
+                    child: const _SignalLegend(),
+                  ),
+                  Positioned(
+                    left: 16,
+                    right: 16,
+                    bottom: 16,
+                    child: _BottomBar(pointCount: _session.points.length, feedback: _feedback),
+                  ),
+                ],
+              ),
+            ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+/// Renders the floor plan at its true aspect ratio (centered, letterboxed
+/// if needed) so it never looks stretched, and keeps tap/marker coordinates
+/// mapped to that same box regardless of screen orientation.
+class _PlanCanvas extends StatelessWidget {
+  final String planImagePath;
+  final double aspectRatio;
+  final List<CapturedPoint> points;
+  final void Function(Offset localPosition, Size imageSize) onTapImage;
+
+  const _PlanCanvas({
+    required this.planImagePath,
+    required this.aspectRatio,
+    required this.points,
+    required this.onTapImage,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return InteractiveViewer(
+      maxScale: 4,
+      child: Center(
+        child: AspectRatio(
+          aspectRatio: aspectRatio,
+          child: LayoutBuilder(
+            builder: (context, constraints) {
+              final size = Size(constraints.maxWidth, constraints.maxHeight);
+              return GestureDetector(
+                onTapUp: (details) => onTapImage(details.localPosition, size),
+                child: Stack(
+                  fit: StackFit.expand,
+                  children: [
+                    Image.file(File(planImagePath), fit: BoxFit.fill),
+                    CustomPaint(painter: HeatmapPainter(points)),
+                    ...points.map(
+                      (p) => Positioned(
+                        left: p.dx * size.width - 7,
+                        top: p.dy * size.height - 7,
+                        child: _PointMarker(quality: AppTheme.qualityForRssi(p.rssiDbm)),
+                      ),
+                    ),
+                  ],
+                ),
+              );
+            },
+          ),
+        ),
       ),
     );
   }
@@ -282,7 +344,7 @@ class _GlassCard extends StatelessWidget {
     return ClipRRect(
       borderRadius: BorderRadius.circular(20),
       child: BackdropFilter(
-        filter: ImageFilter.blur(sigmaX: 20, sigmaY: 20),
+        filter: ui.ImageFilter.blur(sigmaX: 20, sigmaY: 20),
         child: Container(
           padding: padding,
           decoration: BoxDecoration(
