@@ -1,6 +1,11 @@
 import 'dart:io';
 
 import 'package:flutter/services.dart';
+import 'package:permission_handler/permission_handler.dart';
+
+/// Result of checking/requesting the location permission Android requires
+/// to reveal the connected network's SSID (RSSI itself doesn't need it).
+enum LocationPermissionResult { granted, denied, permanentlyDenied, notApplicable }
 
 class WifiSignalReading {
   final bool connected;
@@ -18,6 +23,28 @@ class WifiSignalReading {
 /// that covers both.
 class WifiService {
   static const _channel = MethodChannel('rushuu_wifi_home_heatmap/wifi');
+
+  /// Android hides the connected SSID (returns a placeholder) unless the
+  /// app holds a granted location permission, even though the manifest
+  /// declares it — the OS still requires the runtime grant. Not applicable
+  /// on Linux, which has no such restriction.
+  Future<LocationPermissionResult> checkLocationPermissionStatus() async {
+    if (!Platform.isAndroid) return LocationPermissionResult.notApplicable;
+    final status = await Permission.locationWhenInUse.status;
+    return _mapStatus(status);
+  }
+
+  Future<LocationPermissionResult> requestLocationPermission() async {
+    if (!Platform.isAndroid) return LocationPermissionResult.notApplicable;
+    final status = await Permission.locationWhenInUse.request();
+    return _mapStatus(status);
+  }
+
+  LocationPermissionResult _mapStatus(PermissionStatus status) {
+    if (status.isGranted) return LocationPermissionResult.granted;
+    if (status.isPermanentlyDenied) return LocationPermissionResult.permanentlyDenied;
+    return LocationPermissionResult.denied;
+  }
 
   Future<WifiSignalReading> readSignal() {
     if (Platform.isAndroid) return _readAndroid();

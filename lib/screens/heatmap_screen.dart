@@ -2,9 +2,11 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:permission_handler/permission_handler.dart' show openAppSettings;
 
 import '../models/captured_point.dart';
 import '../models/heatmap_session.dart';
+import '../models/router_position.dart';
 import '../services/session_storage.dart';
 import '../services/wifi_service.dart';
 import '../theme/app_theme.dart';
@@ -26,6 +28,11 @@ class _HeatmapScreenState extends State<HeatmapScreen> {
   double? _planAspectRatio;
   bool _showLegend = false;
 
+  /// True while the next tap on the plan should place the router marker
+  /// instead of capturing a signal reading. Starts true when a session has
+  /// no router yet, since that's the first thing you need to mark.
+  late bool _placingRouter = _session.routerPosition == null;
+
   /// Position of an in-flight capture, shown as a small local spinner
   /// instead of dimming the whole screen so the user can keep walking
   /// and tapping without losing sight of the plan.
@@ -36,6 +43,49 @@ class _HeatmapScreenState extends State<HeatmapScreen> {
   void initState() {
     super.initState();
     _resolvePlanAspectRatio();
+    WidgetsBinding.instance.addPostFrameCallback((_) => _ensureLocationPermission());
+  }
+
+  /// Android hides the real SSID unless location permission is granted at
+  /// runtime, regardless of what the manifest declares. Ask once per visit,
+  /// with a plain-language rationale first so the OS prompt isn't a surprise.
+  Future<void> _ensureLocationPermission() async {
+    final status = await _wifiService.checkLocationPermissionStatus();
+    if (status != LocationPermissionResult.denied || !mounted) return;
+
+    final proceed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Permiso de ubicación'),
+        content: const Text(
+          'Android exige el permiso de ubicación para poder leer el nombre (SSID) de la red wifi conectada. '
+          'La app no usa tu posición GPS, solo necesita el permiso para esa lectura.',
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.of(context).pop(false), child: const Text('Ahora no')),
+          FilledButton(onPressed: () => Navigator.of(context).pop(true), child: const Text('Conceder')),
+        ],
+      ),
+    );
+    if (proceed != true) return;
+
+    final result = await _wifiService.requestLocationPermission();
+    if (result != LocationPermissionResult.permanentlyDenied || !mounted) return;
+
+    final openSettings = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Permiso bloqueado'),
+        content: const Text(
+          'Denegaste el permiso de forma permanente. Puedes concederlo desde los ajustes de la app para ver el SSID de la red.',
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.of(context).pop(false), child: const Text('Cerrar')),
+          FilledButton(onPressed: () => Navigator.of(context).pop(true), child: const Text('Abrir ajustes')),
+        ],
+      ),
+    );
+    if (openSettings == true) await openAppSettings();
   }
 
   /// Reads the plan image's real pixel dimensions so it can be displayed
@@ -46,6 +96,29 @@ class _HeatmapScreenState extends State<HeatmapScreen> {
     final image = await decodeImageFromList(bytes);
     if (!mounted) return;
     setState(() => _planAspectRatio = image.width / image.height);
+  }
+
+  Future<void> _handleTap(Offset localPosition, Size imageSize) async {
+    if (_placingRouter) {
+      await _placeRouter(localPosition, imageSize);
+    } else {
+      await _capturePoint(localPosition, imageSize);
+    }
+  }
+
+  Future<void> _placeRouter(Offset localPosition, Size imageSize) async {
+    final position = RouterPosition(
+      dx: (localPosition.dx / imageSize.width).clamp(0.0, 1.0),
+      dy: (localPosition.dy / imageSize.height).clamp(0.0, 1.0),
+    );
+    final updated = _session.copyWith(routerPosition: position);
+    HapticFeedback.mediumImpact();
+    setState(() {
+      _session = updated;
+      _placingRouter = false;
+      _feedback = const _CaptureFeedback(message: 'Router colocado', success: true, quality: 1);
+    });
+    await _storage.save(updated);
   }
 
   Future<void> _capturePoint(Offset localPosition, Size imageSize) async {
@@ -130,6 +203,13 @@ class _HeatmapScreenState extends State<HeatmapScreen> {
         title: const Text('Mapa de cobertura'),
         actions: [
           IconButton(
+            tooltip: _session.routerPosition == null ? 'Colocar router' : 'Mover router',
+            onPressed: _placingRouter ? null : () => setState(() => _placingRouter = true),
+            isSelected: _placingRouter,
+            icon: const Icon(Icons.router_outlined),
+            selectedIcon: const Icon(Icons.router_rounded),
+          ),
+          IconButton(
             tooltip: 'Leyenda de señal',
             onPressed: () => setState(() => _showLegend = !_showLegend),
             isSelected: _showLegend,
@@ -156,11 +236,26 @@ class _HeatmapScreenState extends State<HeatmapScreen> {
                           planImagePath: _session.planImagePath,
                           aspectRatio: _planAspectRatio!,
                           points: _session.points,
+                          routerPosition: _session.routerPosition,
                           pendingTapPosition: _pendingTapPosition,
-                          onTapImage: _capturePoint,
+                          placingRouter: _placingRouter,
+                          onTapImage: _handleTap,
                           onDeletePoint: _deletePointAt,
                         ),
                 ),
+                if (_placingRouter)
+                  Positioned(
+                    top: 12,
+                    left: 16,
+                    right: 16,
+                    child: SafeArea(
+                      bottom: false,
+                      child: _RouterPlacementBanner(
+                        canCancel: _session.routerPosition != null,
+                        onCancel: () => setState(() => _placingRouter = false),
+                      ),
+                    ),
+                  ),
                 if (_showLegend)
                   SafeArea(
                     child: Align(
@@ -174,7 +269,7 @@ class _HeatmapScreenState extends State<HeatmapScreen> {
               ],
             ),
           ),
-          _BottomBar(pointCount: _session.points.length, feedback: _feedback),
+          _BottomBar(pointCount: _session.points.length, feedback: _feedback, placingRouter: _placingRouter),
         ],
       ),
     );
@@ -188,7 +283,9 @@ class _PlanCanvas extends StatelessWidget {
   final String planImagePath;
   final double aspectRatio;
   final List<CapturedPoint> points;
+  final RouterPosition? routerPosition;
   final Offset? pendingTapPosition;
+  final bool placingRouter;
   final void Function(Offset localPosition, Size imageSize) onTapImage;
   final void Function(int index) onDeletePoint;
 
@@ -196,7 +293,9 @@ class _PlanCanvas extends StatelessWidget {
     required this.planImagePath,
     required this.aspectRatio,
     required this.points,
+    required this.routerPosition,
     required this.pendingTapPosition,
+    required this.placingRouter,
     required this.onTapImage,
     required this.onDeletePoint,
   });
@@ -226,6 +325,12 @@ class _PlanCanvas extends StatelessWidget {
                           onLongPress: () => onDeletePoint(i),
                           child: _PointMarker(quality: AppTheme.qualityForRssi(points[i].rssiDbm)),
                         ),
+                      ),
+                    if (routerPosition != null)
+                      Positioned(
+                        left: routerPosition!.dx * size.width - 18,
+                        top: routerPosition!.dy * size.height - 18,
+                        child: IgnorePointer(ignoring: placingRouter, child: const _RouterMarker()),
                       ),
                     if (pendingTapPosition != null)
                       Positioned(
@@ -280,6 +385,58 @@ class _PointMarker extends StatelessWidget {
   }
 }
 
+/// Distinct landmark marker for the router, so it's never confused with a
+/// signal-quality measurement dot.
+class _RouterMarker extends StatelessWidget {
+  const _RouterMarker();
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Container(
+      width: 36,
+      height: 36,
+      alignment: Alignment.center,
+      decoration: BoxDecoration(
+        color: scheme.primary,
+        shape: BoxShape.circle,
+        border: Border.all(color: Colors.white, width: 2.5),
+        boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.35), blurRadius: 8, offset: const Offset(0, 2))],
+      ),
+      child: const Icon(Icons.router_rounded, color: Colors.white, size: 20),
+    );
+  }
+}
+
+class _RouterPlacementBanner extends StatelessWidget {
+  final bool canCancel;
+  final VoidCallback onCancel;
+
+  const _RouterPlacementBanner({required this.canCancel, required this.onCancel});
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return _GlassCard(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+      child: Row(
+        children: [
+          Icon(Icons.router_rounded, color: scheme.primary),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Text(
+              'Toca el plano donde está el router',
+              style: Theme.of(context).textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w600),
+            ),
+          ),
+          if (canCancel)
+            TextButton(onPressed: onCancel, child: const Text('Cancelar')),
+        ],
+      ),
+    );
+  }
+}
+
 class _SignalLegend extends StatelessWidget {
   const _SignalLegend();
 
@@ -319,8 +476,9 @@ class _SignalLegend extends StatelessWidget {
 class _BottomBar extends StatelessWidget {
   final int pointCount;
   final _CaptureFeedback? feedback;
+  final bool placingRouter;
 
-  const _BottomBar({required this.pointCount, required this.feedback});
+  const _BottomBar({required this.pointCount, required this.feedback, required this.placingRouter});
 
   @override
   Widget build(BuildContext context) {
@@ -348,8 +506,11 @@ class _BottomBar extends StatelessWidget {
               child: AnimatedSwitcher(
                 duration: const Duration(milliseconds: 200),
                 child: Text(
-                  feedback?.message ?? 'Toca el plano donde estás para medir la señal ahí',
-                  key: ValueKey(feedback?.message),
+                  feedback?.message ??
+                      (placingRouter
+                          ? 'Toca el plano donde está el router'
+                          : 'Toca el plano donde estás para medir la señal ahí'),
+                  key: ValueKey(feedback?.message ?? placingRouter),
                   style: Theme.of(context).textTheme.bodyMedium,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
